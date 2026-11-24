@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Tranquil</title>
+<meta name="theme-color" content="#0b2a3a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<style>
+html,body{margin:0;height:100%;background:#0b2a3a;overflow:hidden;overscroll-behavior:none;font-family:system-ui,sans-serif;color:#fff;-webkit-tap-highlight-color:transparent;user-select:none}
+canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none;display:block}
+#hint{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;font-size:1.05rem;letter-spacing:.3em;text-transform:uppercase;text-shadow:0 1px 10px #0009;transition:opacity 1.5s}
+#hint.off{opacity:0}
+#msg{position:fixed;top:max(14px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);padding:6px 14px;border-radius:99px;background:#0008;font-size:.85rem;opacity:0;transition:opacity .4s;pointer-events:none}
+#msg.on{opacity:1}
+#menuBtn{position:fixed;right:max(16px,env(safe-area-inset-right));bottom:max(16px,env(safe-area-inset-bottom));width:48px;height:48px;border-radius:50%;border:1px solid #fff5;background:#0006;color:#fff;font-size:20px;backdrop-filter:blur(8px)}
+#panel{position:fixed;left:0;right:0;bottom:0;box-sizing:border-box;padding:20px 20px calc(24px + env(safe-area-inset-bottom));background:#0b1c26ee;backdrop-filter:blur(14px);border-radius:20px 20px 0 0;transform:translateY(110%);transition:transform .35s;max-height:70vh;overflow:auto}
+#panel.open{transform:none}
+h2{font-size:.75rem;letter-spacing:.2em;text-transform:uppercase;opacity:.6;margin:14px 0 8px}
+.row{display:flex;flex-wrap:wrap;gap:8px}
+.chip{min-height:44px;padding:0 16px;border-radius:99px;border:1px solid #fff4;background:#fff1;color:#fff;font-size:1rem}
+.chip[aria-pressed=true]{background:#fff;color:#0b1c26}
+.chip:focus-visible,#menuBtn:focus-visible{outline:2px solid #8cf;outline-offset:2px}
+#fail{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:30px;text-align:center}
+</style></head><body>
+<canvas id="c" aria-label="Still water. Touch to make ripples."></canvas>
+<div id="hint">Touch the water</div>
+<div id="msg" role="status"></div>
+<button id="menuBtn" aria-label="Settings" aria-expanded="false">&#9776;</button>
+<aside id="panel" inert aria-label="Settings"></aside>
+<div id="fail" hidden>Tranquil needs WebGL2 with float rendering, which this device doesn’t support.</div>
+<script>
+(()=>{'use strict';
+const $=id=>document.getElementById(id);
+const ls={get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+// ---- EDIT ME: put your files in /audio and list them here ----
+const TRACKS=[{name:'Gentle Rain',file:'audio/rain.mp3'},{name:'Night Crickets',file:'audio/night.mp3'},{name:'Ocean Hush',file:'audio/ocean.mp3'}];
+const THEMES={
+Daylight:{deep:[.03,.25,.35],shal:[.25,.62,.7],sky:[.75,.9,1],light:[.4,.5,.75],spec:[1,.97,.9]},
+Moonlit:{deep:[.01,.03,.09],shal:[.05,.12,.25],sky:[.35,.45,.7],light:[-.3,.4,.8],spec:[.8,.88,1]},
+Dusk:{deep:[.12,.05,.2],shal:[.55,.25,.35],sky:[1,.65,.5],light:[.7,.2,.55],spec:[1,.8,.6]},
+Emerald:{deep:[0,.15,.12],shal:[.1,.5,.4],sky:[.7,1,.9],light:[.2,.5,.8],spec:[.95,1,.9]}};
+let theme=ls.get('tq-theme');if(!THEMES[theme])theme='Daylight';
+let ti=+ls.get('tq-track')||0;if(!TRACKS[ti])ti=0;
+let started=false,paused=false,msgT;
+const msg=t=>{const m=$('msg');m.textContent=t;m.classList.toggle('on',!!t);clearTimeout(msgT);if(t)msgT=setTimeout(()=>m.classList.remove('on'),3500)};
+
+// ---- audio ----
+const au=new Audio();au.loop=true;au.preload='auto';
+let blobUrl=null,tok=0;
+async function audioUrl(f){let r;
+ if(window.caches){const c=await caches.open('tranquil-audio-v1');r=await c.match(f);if(!r){r=await fetch(f);if(!r.ok)throw new Error(r.status);await c.put(f,r.clone())}}
+ else{r=await fetch(f);if(!r.ok)throw new Error(r.status)}
+ return URL.createObjectURL(await r.blob())}
+async function loadTrack(){const my=++tok;msg('Loading…');
+ try{const u=await audioUrl(TRACKS[ti].file);if(my!==tok){URL.revokeObjectURL(u);return}
+  if(blobUrl)URL.revokeObjectURL(blobUrl);blobUrl=u;au.src=u;if(!paused)await au.play();msg('');
+  if('mediaSession'in navigator){navigator.mediaSession.metadata=new MediaMetadata({title:TRACKS[ti].name,artist:'Tranquil'});
+   navigator.mediaSession.setActionHandler('play',()=>setPaused(false));navigator.mediaSession.setActionHandler('pause',()=>setPaused(true))}
+ }catch(e){if(my===tok)msg('Audio unavailable. Check your connection.')}}
+function setPaused(p){paused=p;if(!started)return;if(p)au.pause();else au.play().catch(()=>msg('Tap again to play'));renderPanel()}
+
+// ---- panel ----
+const panel=$('panel'),btn=$('menuBtn');
+function chip(label,on,fn){const b=document.createElement('button');b.className='chip';b.textContent=label;b.setAttribute('aria-pressed',on);b.onclick=fn;return b}
+function renderPanel(){panel.textContent='';
+ const sec=(t,items)=>{const h=document.createElement('h2');h.textContent=t;const r=document.createElement('div');r.className='row';items.forEach(i=>r.append(i));panel.append(h,r)};
+ sec('Sound',[...TRACKS.map((t,i)=>chip(t.name,i===ti,()=>{ti=i;ls.set('tq-track',i);renderPanel();if(started)loadTrack()})),chip(paused?'Play':'Pause',false,()=>setPaused(!paused))]);
+ sec('Water',Object.keys(THEMES).map(n=>chip(n,n===theme,()=>{theme=n;ls.set('tq-theme',n);renderPanel()})))}
+function togglePanel(o){const open=o??!panel.classList.contains('open');panel.classList.toggle('open',open);panel.inert=!open;btn.setAttribute('aria-expanded',open)}
+btn.onclick=e=>{e.stopPropagation();togglePanel()};
+addEventListener('keydown',e=>{if(e.key==='Escape')togglePanel(false)});
+renderPanel();
+
+// ---- water ----
+const cv=$('c');let gl=cv.getContext('webgl2',{antialias:false,alpha:false});
+const fail=()=>{$('fail').hidden=false;cv.hidden=true;$('hint').hidden=true};
+if(!gl||!(gl.getExtension('EXT_color_buffer_float')||gl.getExtension('EXT_color_buffer_half_float')))return fail();
+const damp=matchMedia('(prefers-reduced-motion: reduce)').matches?.985:.996;
+const VS='#version 300 es\nvoid main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.-1.,0.,1.);}';
+const SIM='#version 300 es\nprecision highp float;uniform sampler2D uT;uniform vec2 uSz;uniform vec4 uD[4];uniform float uDamp;out vec4 o;\nvoid main(){vec2 uv=gl_FragCoord.xy/uSz,t=1./uSz;vec2 c=texture(uT,uv).xy;\nfloat s=texture(uT,uv+vec2(t.x,0.)).x+texture(uT,uv-vec2(t.x,0.)).x+texture(uT,uv+vec2(0.,t.y)).x+texture(uT,uv-vec2(0.,t.y)).x;\nfloat n=(s*.5-c.y)*uDamp;\nfor(int i=0;i<4;i++){vec2 d=(uv-uD[i].xy)*vec2(uSz.x/uSz.y,1.);n+=uD[i].w*exp(-dot(d,d)/(uD[i].z*uD[i].z));}\no=vec4(n,c.x,0.,1.);}';
+const REN='#version 300 es\nprecision highp float;uniform sampler2D uT;uniform vec2 uSz,uRes;uniform vec3 uDeep,uShal,uSky,uLight,uSpec;uniform float uTime;out vec4 o;\nvoid main(){vec2 uv=gl_FragCoord.xy/uRes;vec2 t=1./uSz;\nfloat l=texture(uT,uv-vec2(t.x,0.)).x,r=texture(uT,uv+vec2(t.x,0.)).x,d=texture(uT,uv-vec2(0.,t.y)).x,u=texture(uT,uv+vec2(0.,t.y)).x;\nvec3 n=normalize(vec3((l-r)*8.,(d-u)*8.,1.));\nvec2 q=uv+n.xy*.08;\nfloat g=clamp(q.y*.9+.08*sin(q.x*3.+uTime*.05),0.,1.);\nvec3 col=mix(uShal,uDeep,g);\ncol+=.035*sin(q.x*9.+uTime*.1)*sin(q.y*7.-uTime*.08);\ncol=mix(col,uSky,clamp(pow(1.-n.z,2.)*3.+.03,0.,.65));\nvec3 H=normalize(normalize(uLight)+vec3(0.,0.,1.));\ncol+=uSpec*pow(max(dot(n,H),0.),140.)*1.3;\no=vec4(col,1.);}';
+let P={},sw,sh,tex=[],fbo=[],cur=0,drops=[],acc=0,last=0,raf=0,rt;
+const loc=(p,n)=>gl.getUniformLocation(p,n);
+function prog(fs){const p=gl.createProgram();for(const[t,s]of[[gl.VERTEX_SHADER,VS],[gl.FRAGMENT_SHADER,fs]]){const h=gl.createShader(t);gl.shaderSource(h,s);gl.compileShader(h);if(!gl.getShaderParameter(h,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(h));gl.attachShader(p,h)}gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));return p}
+function size(){const d=Math.min(devicePixelRatio||1,1.5);cv.width=Math.round(innerWidth*d);cv.height=Math.round(innerHeight*d)}
+function initSim(){sw=384;sh=Math.max(96,Math.min(1024,Math.round(sw*innerHeight/innerWidth)));
+ for(let i=0;i<2;i++){if(tex[i])gl.deleteTexture(tex[i]);if(fbo[i])gl.deleteFramebuffer(fbo[i]);
+  const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,sw,sh,0,gl.RGBA,gl.HALF_FLOAT,null);
+  for(const[k,v]of[[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]])gl.texParameteri(gl.TEXTURE_2D,k,v);
+  const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+  if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error('fbo');tex[i]=t;fbo[i]=f}
+ gl.bindFramebuffer(gl.FRAMEBUFFER,null);cur=0}
+function init(){try{P.sim=prog(SIM);P.ren=prog(REN);size();initSim()}catch(e){console.error(e);fail();return false}return true}
+function step(first){const D=new Float32Array(16);if(first)for(let i=0;i<4&&drops.length;i++)D.set(drops.shift(),i*4);
+ gl.bindFramebuffer(gl.FRAMEBUFFER,fbo[1-cur]);gl.viewport(0,0,sw,sh);gl.useProgram(P.sim);
+ gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tex[cur]);
+ gl.uniform1i(loc(P.sim,'uT'),0);gl.uniform2f(loc(P.sim,'uSz'),sw,sh);gl.uniform4fv(loc(P.sim,'uD[0]'),D);gl.uniform1f(loc(P.sim,'uDamp'),damp);
+ gl.drawArrays(gl.TRIANGLES,0,3);cur=1-cur}
+function draw(ts){const T=THEMES[theme],p=P.ren;gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,cv.width,cv.height);gl.useProgram(p);
+ gl.bindTexture(gl.TEXTURE_2D,tex[cur]);gl.uniform1i(loc(p,'uT'),0);gl.uniform2f(loc(p,'uSz'),sw,sh);gl.uniform2f(loc(p,'uRes'),cv.width,cv.height);gl.uniform1f(loc(p,'uTime'),ts/1000);
+ gl.uniform3fv(loc(p,'uDeep'),T.deep);gl.uniform3fv(loc(p,'uShal'),T.shal);gl.uniform3fv(loc(p,'uSky'),T.sky);gl.uniform3fv(loc(p,'uLight'),T.light);gl.uniform3fv(loc(p,'uSpec'),T.spec);
+ gl.drawArrays(gl.TRIANGLES,0,3)}
+function frame(ts){raf=requestAnimationFrame(frame);acc+=Math.min(ts-last,50);last=ts;
+ for(let n=0;acc>=8.33&&n<6;n++){acc-=8.33;step(n===0)}draw(ts)}
+function run(){cancelAnimationFrame(raf);last=performance.now();raf=requestAnimationFrame(frame)}
+const addDrop=(e,s)=>{if(drops.length<16)drops.push([e.clientX/innerWidth,1-e.clientY/innerHeight,.018,s])};
+let lastMove=0;
+cv.addEventListener('pointerdown',e=>{togglePanel(false);addDrop(e,.7);
+ if(!started){started=true;$('hint').classList.add('off');loadTrack()}});
+cv.addEventListener('pointermove',e=>{if(e.buttons&&e.timeStamp-lastMove>35){lastMove=e.timeStamp;addDrop(e,.25)}});
+addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(()=>{size();initSim();drops=[]},150)});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelAnimationFrame(raf);else run()});
+cv.addEventListener('webglcontextlost',e=>{e.preventDefault();cancelAnimationFrame(raf)});
+cv.addEventListener('webglcontextrestored',()=>{if(init())run()});
+if(init())run();
+if('serviceWorker'in navigator)addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+})();
+</script></body></html>
